@@ -1,0 +1,25 @@
+title: "Test Exam"
+time_minutes: 1
+sections:
+  - name: Section A
+    questions:
+      - name: First
+        text: |-
+          Long text
+          for question First
+          with multiple lines
+          and long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long lines
+        recommended_minutes: 2
+      - name: 2
+        text: "Test question 2"
+        recommended_minutes: 2
+  - name: Section B
+    questions:
+      - name: 3
+        text: "Test question 3"
+        recommended_minutes: 3
+      - name: 4
+        text: "Test question 4"
+        recommended_minutes: 3
+options:
+  show_recommended: true

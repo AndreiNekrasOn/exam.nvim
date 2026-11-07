@@ -55,7 +55,17 @@ sections:
 options: # all optional; override the plugin config, manifest wins
   show_recommended: true
   write_on_time_up: true
-  texts: { commit: "COMMIT" }
+  texts:
+    commit: "COMMIT"
+```
+
+`text` may span several lines. Use a YAML block scalar (`|-` keeps no trailing newline, `|` keeps one, `>` folds) or `\n` inside double quotes; plain indented lines are not valid YAML:
+
+```yaml
+- name: 1
+  text: |-
+    First line
+    second line
 ```
 
 ## Plugin configuration
@@ -63,7 +73,7 @@ options: # all optional; override the plugin config, manifest wins
 ```lua
 require("exam").setup({
   show_recommended = false, -- show recommended time
-  write_on_time_up = false, -- snapshot state when overdraft starts
+  write_on_time_up = true, -- snapshot the state when overdraft starts
   hide_list_before_start = false, -- hide the questions list before start
   hide_list_message = "",
   overdraft_thresholds = { first = 300, second = 600, fraction = 0.33 }, -- seconds/ratio
@@ -73,7 +83,7 @@ require("exam").setup({
 
 ## Export
 
-`:ExamExport <file>` writes the result; `:ExamExportAndPause` also pauses (the session stays resumable). With overdraft, a `## AFTER TIME UP` section is appended holding the same structure for the questions whose answer text changed.
+`:ExamExport <file>` writes the result; `:ExamExportAndPause` also pauses (the session stays resumable). With overdraft, a `## AFTER TIME UP` section is appended: its table lists every question that got time after the limit (so you can see where the overdraft went), while the per-question bodies are only shown for questions whose answer text changed.
 
 ```markdown
 ## BEFORE TIME UP
