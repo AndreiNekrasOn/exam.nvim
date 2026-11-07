@@ -2,6 +2,10 @@
 
 Neovim plugin for taking written exams: exam timer, per-question timing, question statuses, answer drafts, and result export. Requires Neovim 0.10+.
 
+## LLM Usage Notice
+
+Fully vibecoded, I haven't looked at the code at all. I just needed this tool for myself. Use at your own risk.
+
 ## Commands
 
 | Action | UI | Command | Function |
