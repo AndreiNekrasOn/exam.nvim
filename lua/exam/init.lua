@@ -110,17 +110,63 @@ local function win_ok(win)
   return win and vim.api.nvim_win_is_valid(win)
 end
 
+-- v:exiting is vim.NIL when not exiting, otherwise a (possibly zero) number.
+local function quitting()
+  local e = vim.v.exiting
+  return type(e) == "number" and e ~= 0
+end
+
 local function ensure_mouse()
   if not vim.o.mouse:find("n") then
     vim.opt.mouse:append("n")
   end
 end
 
+-- Forward declarations: defined in the panel/UI section, needed by build_sidebar
+-- and by the buffer-close autocommands below.
+local panel_width, clip_display
+local close_ui
+local closing_ui = false
+
 -- Forward declaration: defined in the "Exam actions" section, needed by the UI.
 local apply_status
 
--- Forward declarations: defined in the panel/UI section, needed by build_sidebar.
-local panel_width, clip_display
+-- Tearing the panel UI down is triggered from buffer autocommands, so it lives
+-- here (early) to be in scope when question/panel buffers are created. Closing
+-- any panel buffer closes the rest; closing the buffer shown in the main window
+-- is the same as toggling the panels off. The session itself stays active.
+local function on_aux_buf_gone(buf)
+  local grp = vim.api.nvim_create_augroup("ExamAux_" .. buf, { clear = true })
+  vim.api.nvim_create_autocmd({ "BufUnload", "BufHidden", "BufWipeout", "BufDelete" }, {
+    group = grp,
+    buffer = buf,
+    callback = function()
+      if state.active and not closing_ui and not quitting() then
+        -- Defer: closing windows/buffers from inside a buffer event confuses
+        -- Neovim's own ":bd" bookkeeping (E937).
+        vim.schedule(close_ui)
+      end
+    end,
+  })
+end
+
+local function on_main_buf_gone(buf)
+  local grp = vim.api.nvim_create_augroup("ExamMain_" .. buf, { clear = true })
+  vim.api.nvim_create_autocmd("BufUnload", {
+    group = grp,
+    buffer = buf,
+    callback = function()
+      -- Decide while the window still points at the buffer (it switches away
+      -- right after BufUnload).
+      local is_main = state.active
+        and win_ok(state.main_win)
+        and vim.api.nvim_win_get_buf(state.main_win) == buf
+      if is_main and not closing_ui and not quitting() then
+        vim.schedule(close_ui)
+      end
+    end,
+  })
+end
 
 local status_suffix = {
   not_started = "NotStarted",
@@ -587,6 +633,7 @@ local function setup_question_autocmds(name, buf)
       write_buf(buf)
     end,
   })
+  on_main_buf_gone(buf)
 end
 
 local function ensure_question_buf(name)
@@ -1139,12 +1186,15 @@ end
 local function ensure_ui_buffers()
   if not buf_ok(state.timer_buf) then
     state.timer_buf = create_scratch()
+    on_aux_buf_gone(state.timer_buf)
   end
   if not buf_ok(state.sidebar_buf) then
     state.sidebar_buf = create_scratch()
+    on_aux_buf_gone(state.sidebar_buf)
   end
   if not buf_ok(state.strip_buf) then
     state.strip_buf = create_scratch()
+    on_aux_buf_gone(state.strip_buf)
   end
 end
 
@@ -1177,16 +1227,93 @@ local function layout_ui()
   end
 end
 
-local function close_ui()
+-- Best buffer to leave in a window we are forced to keep alive (the main
+-- window was closed by ":bd"): another open question, else the questions list.
+local function fallback_buffer()
+  for _, q in ipairs(state.questions or {}) do
+    local b = state.bufs[q.name]
+    if buf_ok(b) then
+      return b
+    end
+  end
+  if not buf_ok(state.ql_buf) then
+    state.ql_buf = create_scratch()
+    on_main_buf_gone(state.ql_buf)
+  end
+  return state.ql_buf
+end
+
+-- A throwaway "[No Name]" buffer: empty, unmodified, unnamed, normal.
+local function is_throwaway(b)
+  if not buf_ok(b) or not vim.bo[b].buflisted or vim.bo[b].buftype ~= "" or vim.bo[b].modified then
+    return false
+  end
+  if vim.api.nvim_buf_get_name(b) ~= "" then
+    return false
+  end
+  local first = vim.api.nvim_buf_get_lines(b, 0, 1, false)[1]
+  return first == nil or first == ""
+end
+
+-- Remove throwaway "[No Name]" buffers Neovim leaves behind when ":bd" closed
+-- the main window (same idea as the startup-buffer cleanup in bootstrap).
+local function sweep_unnamed()
+  local main_buf = win_ok(state.main_win) and vim.api.nvim_win_get_buf(state.main_win) or nil
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if b ~= main_buf and is_throwaway(b) then
+      pcall(vim.api.nvim_buf_delete, b, {})
+    end
+  end
+end
+
+close_ui = function()
+  if closing_ui then
+    return
+  end
+  closing_ui = true
+  local fallback = fallback_buffer()
+  local need_sweep = false
   for _, w in ipairs({ state.strip_win, state.sidebar_win, state.timer_win }) do
     if win_ok(w) then
-      vim.api.nvim_win_close(w, true)
+      if #vim.api.nvim_list_wins() > 1 then
+        vim.api.nvim_win_close(w, true)
+      else
+        -- Only panel windows are left (":bd" closed the main window): reclaim
+        -- this one as the main window so the exam UI stays usable.
+        vim.api.nvim_win_set_buf(w, fallback)
+        state.main_win = w
+        need_sweep = true
+      end
     end
   end
   state.strip_win, state.sidebar_win, state.timer_win = nil, nil, nil
-  if win_ok(state.main_win) then
-    vim.wo[state.main_win].statusline = ""
+  -- Wipe the panel buffers too, so closing one panel cannot leave hidden
+  -- scratch buffers around; layout_ui recreates them on the next toggle.
+  for _, b in ipairs({ state.strip_buf, state.sidebar_buf, state.timer_buf }) do
+    if buf_ok(b) then
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
+    end
   end
+  state.strip_buf, state.sidebar_buf, state.timer_buf = nil, nil, nil
+  if win_ok(state.main_win) then
+    local mb = vim.api.nvim_win_get_buf(state.main_win)
+    if is_throwaway(mb) then
+      -- The main window lost its exam buffer (e.g. the questions list was
+      -- deleted); show another open question or a fresh questions list.
+      local fb = fallback_buffer()
+      if buf_ok(fb) then
+        vim.api.nvim_win_set_buf(state.main_win, fb)
+        mb = fb
+        need_sweep = true
+      end
+    end
+    vim.wo[state.main_win].statusline = (buf_ok(state.ql_buf) and mb == state.ql_buf) and " " or ""
+  end
+  closing_ui = false
+  if need_sweep then
+    sweep_unnamed()
+  end
+  M.render()
 end
 
 function M.toggle_ui()
@@ -1206,6 +1333,7 @@ function M.open_questions()
   end
   if not buf_ok(state.ql_buf) then
     state.ql_buf = create_scratch()
+    on_main_buf_gone(state.ql_buf)
   end
   if not win_ok(state.main_win) then
     state.main_win = vim.api.nvim_get_current_win()
@@ -1666,6 +1794,22 @@ vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
     local w = vim.api.nvim_get_current_win()
     if is_aux_win(w) then
       reset_leftcol(w)
+    end
+  end,
+})
+
+-- ":bd" on the buffer shown in the main window may close that window (stock
+-- Vim behaviour); if so we lose state.main_win before any Buf* event, so detect
+-- it here and tear the panels down (reclaiming a window if needed).
+vim.api.nvim_create_autocmd("WinClosed", {
+  group = exam_group,
+  callback = function(ev)
+    if not state.active or closing_ui or quitting() then
+      return
+    end
+    if tonumber(ev.match) == state.main_win then
+      state.main_win = nil
+      vim.schedule(close_ui)
     end
   end,
 })
